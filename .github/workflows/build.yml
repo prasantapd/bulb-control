@@ -1,1 +1,392 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Create project files
+        run: |
+          set -e
+          mkdir -p app/src/main/java/com/bulbctl/app app/src/main/assets
+          cat > settings.gradle << 'EOF_MARK'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = 'BulbControl'
+          include ':app'
+          EOF_MARK
+          cat > build.gradle << 'EOF_MARK'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF_MARK
+          cat > gradle.properties << 'EOF_MARK'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          EOF_MARK
+          cat > app/build.gradle << 'EOF_MARK'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.bulbctl.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.bulbctl.app'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF_MARK
+          cat > app/src/main/AndroidManifest.xml << 'EOF_MARK'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <application
+                  android:label="বাল্ব কন্ট্রোল"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_MARK
+          cat > app/src/main/java/com/bulbctl/app/MainActivity.java << 'EOF_MARK'
+          package com.bulbctl.app;
 
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.pm.PackageManager;
+          import android.os.Bundle;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.PermissionRequest;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+
+          public class MainActivity extends Activity {
+              private WebView web;
+              private PermissionRequest pendingRequest;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  web = new WebView(this);
+                  setContentView(web);
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  web.addJavascriptInterface(new Bridge(), "AndroidBridge");
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onPermissionRequest(final PermissionRequest req) {
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                      req.grant(req.getResources());
+                                  } else {
+                                      pendingRequest = req;
+                                      requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+                                  }
+                              }
+                          });
+                      }
+                  });
+                  web.loadUrl("file:///android_asset/index.html");
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+                  super.onRequestPermissionsResult(code, perms, results);
+                  if (pendingRequest != null) {
+                      if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+                          pendingRequest.grant(pendingRequest.getResources());
+                      } else {
+                          pendingRequest.deny();
+                      }
+                      pendingRequest = null;
+                  }
+              }
+
+              class Bridge {
+                  @JavascriptInterface
+                  public void get(final String url) {
+                      new Thread(new Runnable() {
+                          @Override
+                          public void run() {
+                              boolean ok = false;
+                              try {
+                                  HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                                  c.setConnectTimeout(800);
+                                  c.setReadTimeout(800);
+                                  c.getResponseCode();
+                                  c.disconnect();
+                                  ok = true;
+                              } catch (Exception e) {
+                                  ok = false;
+                              }
+                              final boolean result = ok;
+                              runOnUiThread(new Runnable() {
+                                  @Override
+                                  public void run() {
+                                      web.evaluateJavascript("window.bulbDone(" + result + ")", null);
+                                  }
+                              });
+                          }
+                      }).start();
+                  }
+              }
+          }
+          EOF_MARK
+          cat > app/src/main/assets/index.html << 'EOF_MARK'
+          <!DOCTYPE html>
+          <html lang="bn">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>বাল্ব কন্ট্রোল</title>
+          <style>
+            :root { --orb: #6a4cff; --bg: #1b1830; --ink: #f2eefc; --muted: #a79fc6; --line: #3a3560; --acc: #f2eefc; }
+            * { box-sizing: border-box; }
+            html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink);
+              font-family: "Noto Sans Bengali", system-ui, sans-serif; }
+            main { max-width: 460px; margin: 0 auto; padding: 22px 18px 48px; }
+            h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 16px; }
+            h2 { font-size: 1rem; font-weight: 600; margin: 26px 0 10px; color: var(--muted); }
+            .orb { width: 100%; aspect-ratio: 2.2; border-radius: 26px; background: var(--orb);
+              transition: background .1s linear; display: grid; place-items: center;
+              font-size: 1rem; color: rgba(0,0,0,.55); }
+            .row { display: flex; gap: 8px; flex-wrap: wrap; }
+            .row > button { flex: 1 1 0; }
+            button { padding: 13px 8px; font-size: 1rem; font-weight: 600; border-radius: 12px;
+              border: 1px solid var(--line); background: transparent; color: var(--ink); min-width: 0; }
+            button.on { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+            button.big { width: 100%; margin-top: 14px; padding: 16px; font-size: 1.1rem; background: var(--ink); color: var(--bg); }
+            .pair { display: flex; justify-content: space-between; font-size: .9rem; color: var(--muted); margin: 14px 0 6px; }
+            .pair b { color: var(--ink); font-weight: 600; }
+            input[type=text] { width: 100%; padding: 12px; font-size: 1rem; color: var(--ink);
+              background: transparent; border: 1px solid var(--line); border-radius: 10px; }
+            input[type=color] { width: 100%; height: 48px; border: 1px solid var(--line); border-radius: 10px;
+              background: transparent; padding: 3px; }
+            input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 14px;
+              border-radius: 8px; background: var(--line); outline: none; }
+            input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 28px; height: 28px;
+              border-radius: 50%; background: #fff; border: 3px solid var(--bg); box-shadow: 0 0 0 1px var(--muted); }
+            input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 3px solid var(--bg); }
+            #hue { background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+            .meter { height: 10px; border-radius: 6px; background: var(--line); overflow: hidden; }
+            .meter i { display: block; height: 100%; width: 0; background: var(--orb); }
+            button:focus-visible, input:focus-visible { outline: 3px solid #fff; outline-offset: 2px; }
+            #status { margin-top: 14px; font-size: .9rem; color: #ffb4a8; min-height: 1.3em; }
+            .hint { font-size: .82rem; color: var(--muted); margin-top: 6px; }
+          </style>
+          </head>
+          <body>
+          <main>
+            <h1>বাল্ব কন্ট্রোল</h1>
+            <div class="orb" id="orb">বাল্বের রং</div>
+
+            <h2>বাল্বের IP</h2>
+            <input type="text" id="ip" value="192.168.0.115" inputmode="decimal" autocomplete="off">
+
+            <h2>চালু / বন্ধ</h2>
+            <div class="row">
+              <button id="pon">চালু</button>
+              <button id="poff">বন্ধ</button>
+            </div>
+
+            <h2>রং</h2>
+            <input type="color" id="color" value="#6a4cff" aria-label="রং বেছে নিন">
+            <div class="pair"><span>হিউ</span><b id="hueV">260°</b></div>
+            <input type="range" id="hue" min="0" max="360" value="260">
+            <div class="pair"><span>উজ্জ্বলতা</span><b id="briV">100%</b></div>
+            <input type="range" id="bri" min="1" max="100" value="100">
+
+            <h2>স্কিম</h2>
+            <div class="row" id="schemes">
+              <button data-s="0" class="on">সাধারণ</button>
+              <button data-s="2">রং ঘোরা ↑</button>
+              <button data-s="3">রং ঘোরা ↓</button>
+              <button data-s="4">র‍্যান্ডম</button>
+              <button data-s="1">ওয়েকআপ</button>
+            </div>
+            <div class="pair"><span>স্পিড (১ দ্রুত, ৪০ ধীর)</span><b id="spdV">১০</b></div>
+            <input type="range" id="spd" min="1" max="40" value="10">
+            <div class="hint">স্পিড শুধু রং-ঘোরা স্কিমে কাজ করে।</div>
+
+            <h2>গানের তালে রং বদল</h2>
+            <div class="pair"><span>সংবেদনশীলতা</span><b>কম ↔ বেশি</b></div>
+            <input type="range" id="sens" min="1.05" max="1.6" step="0.05" value="1.25" dir="rtl">
+            <div class="pair"><span>এখনকার শব্দ</span></div>
+            <div class="meter"><i id="level"></i></div>
+            <button class="big" id="go">গান শুরু করুন</button>
+
+            <div id="status"></div>
+          </main>
+
+          <script>
+          (function () {
+            var $ = function (id) { return document.getElementById(id); };
+            var ipEl = $("ip"), statusEl = $("status"), orb = $("orb");
+            var hue = 260, sat = 100, bri = 100;
+            var bn = "০১২৩৪৫৬৭৮৯";
+            function toBn(n) { return String(n).replace(/\d/g, function (d) { return bn[d]; }); }
+
+            try { var sv = localStorage.getItem("bulbIp"); if (sv) ipEl.value = sv; } catch (e) {}
+            ipEl.addEventListener("change", function () { try { localStorage.setItem("bulbIp", ipEl.value.trim()); } catch (e) {} });
+
+            /* ---- sending: latest command wins, max ~7 per second ---- */
+            var busy = false, pending = null, lastSend = 0, timer = null;
+            function q(cmd) { pending = cmd; flush(); }
+            function flush() {
+              if (busy || !pending || timer) return;
+              var wait = 140 - (Date.now() - lastSend);
+              if (wait > 0) { timer = setTimeout(function () { timer = null; flush(); }, wait); return; }
+              var cmd = pending; pending = null; busy = true; lastSend = Date.now();
+              var url = "http://" + ipEl.value.trim() + "/cm?cmnd=" + encodeURIComponent(cmd);
+              if (window.AndroidBridge) {
+                var guard = setTimeout(function () { window.bulbDone(false); }, 2500);
+                window.bulbDone = function (ok) {
+                  clearTimeout(guard);
+                  statusEl.textContent = ok ? "" : "বাল্বে পৌঁছানো যাচ্ছে না। IP ঠিক আছে কি না আর ফোন একই ওয়াইফাইতে আছে কি না দেখুন।";
+                  busy = false; flush();
+                };
+                window.AndroidBridge.get(url);
+                return;
+              }
+              var ctl = new AbortController();
+              var t = setTimeout(function () { ctl.abort(); }, 900);
+              fetch("http://" + ipEl.value.trim() + "/cm?cmnd=" + encodeURIComponent(cmd), { mode: "no-cors", signal: ctl.signal })
+                .then(function () { statusEl.textContent = ""; })
+                .catch(function () { statusEl.textContent = "বাল্বে পৌঁছানো যাচ্ছে না। IP ঠিক আছে কি না আর ফোন একই ওয়াইফাইতে আছে কি না দেখুন।"; })
+                .then(function () { clearTimeout(t); busy = false; flush(); });
+            }
+
+            /* ---- colour helpers ---- */
+            function hsb2hex(h, s, b) {
+              s /= 100; b /= 100;
+              var k = function (n) { return (n + h / 60) % 6; };
+              var f = function (n) { return b - b * s * Math.max(0, Math.min(k(n), 4 - k(n), 1)); };
+              var x = function (v) { return ("0" + Math.round(v * 255).toString(16)).slice(-2); };
+              return "#" + x(f(5)) + x(f(3)) + x(f(1));
+            }
+            function hex2hue(hex) {
+              var r = parseInt(hex.substr(1, 2), 16) / 255, g = parseInt(hex.substr(3, 2), 16) / 255, b = parseInt(hex.substr(5, 2), 16) / 255;
+              var mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn, h = 0;
+              if (d) { if (mx === r) h = ((g - b) / d) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4; h *= 60; if (h < 0) h += 360; }
+              return { h: Math.round(h), s: mx ? Math.round(d / mx * 100) : 0 };
+            }
+            function paint() {
+              var hex = hsb2hex(hue, sat, Math.max(25, bri));
+              document.documentElement.style.setProperty("--orb", hex);
+              $("color").value = hsb2hex(hue, sat, 100);
+              $("hue").value = hue; $("hueV").textContent = hue + "°";
+              $("bri").value = bri; $("briV").textContent = bri + "%";
+            }
+            paint();
+
+            /* ---- controls ---- */
+            $("pon").onclick = function () { q("Power On"); };
+            $("poff").onclick = function () { q("Power Off"); };
+
+            $("hue").oninput = function () { hue = +this.value; sat = sat || 100; paint(); q("HSBColor " + hue + "," + sat + "," + bri); };
+            $("bri").oninput = function () { bri = +this.value; paint(); q("Dimmer " + bri); };
+            $("color").oninput = function () {
+              var c = hex2hue(this.value); hue = c.h; sat = c.s; paint();
+              q("Color " + this.value);
+            };
+
+            var sch = document.querySelectorAll("#schemes button");
+            Array.prototype.forEach.call(sch, function (b) {
+              b.onclick = function () {
+                Array.prototype.forEach.call(sch, function (x) { x.classList.remove("on"); });
+                b.classList.add("on");
+                q("Scheme " + b.getAttribute("data-s"));
+              };
+            });
+            $("spd").oninput = function () { $("spdV").textContent = toBn(this.value); q("Speed " + this.value); };
+
+            /* ---- music sync ---- */
+            var goEl = $("go"), levelEl = $("level"), sensEl = $("sens");
+            var running = false, ctx, analyser, stream, data, raf, wakeLock = null, hist = [], lastBeat = 0;
+
+            function loop() {
+              if (!running) return;
+              analyser.getByteFrequencyData(data);
+              var bass = 0, all = 0, i;
+              for (i = 0; i < 4; i++) bass += data[i];
+              bass /= 4;
+              for (i = 0; i < data.length; i++) all += data[i];
+              all /= data.length;
+              levelEl.style.width = Math.min(100, all / 1.6) + "%";
+              hist.push(bass); if (hist.length > 43) hist.shift();
+              var avg = hist.reduce(function (a, b) { return a + b; }, 0) / hist.length;
+              var now = performance.now();
+              if (bass > 60 && bass > avg * parseFloat(sensEl.value) && now - lastBeat > 180) {
+                lastBeat = now;
+                hue = Math.round((hue + 50 + Math.random() * 90) % 360); sat = 100;
+                bri = Math.round(45 + Math.min(55, all));
+                paint();
+                q("HSBColor " + hue + ",100," + bri);
+              }
+              raf = requestAnimationFrame(loop);
+            }
+
+            async function start() {
+              try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+              } catch (e) { statusEl.textContent = "মাইক চালু করা যায়নি। ব্রাউজারে মাইকের অনুমতি দিন।"; return; }
+              try { localStorage.setItem("bulbIp", ipEl.value.trim()); } catch (e) {}
+              ctx = new (window.AudioContext || window.webkitAudioContext)();
+              analyser = ctx.createAnalyser(); analyser.fftSize = 512; analyser.smoothingTimeConstant = 0.6;
+              ctx.createMediaStreamSource(stream).connect(analyser);
+              data = new Uint8Array(analyser.frequencyBinCount);
+              hist = []; running = true;
+              try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+              q("Backlog Power On; Fade 0; Scheme 0");
+              goEl.textContent = "গান বন্ধ করুন";
+              loop();
+            }
+            function stop() {
+              running = false; cancelAnimationFrame(raf);
+              if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+              if (ctx) ctx.close();
+              if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
+              levelEl.style.width = "0";
+              goEl.textContent 
